@@ -1,0 +1,2 @@
+# Shell scripts must use LF so they run on Linux (EC2) after checkout on Windows.
+*.sh text eol=lf

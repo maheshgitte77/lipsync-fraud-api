@@ -1,0 +1,2424 @@
+{
+  "schema_version": 1,
+  "title": "Lip-sync fraud API — reference clips & threshold R&D",
+  "last_updated": "2026-04-04",
+  "notes": [
+    "Scores below are baselines for calibration; re-run scripts/update_lipsync_reference_data.py --measure to refresh after model/code changes.",
+    "SyncNet: lower min_dist is better; PASS when min_dist <= MIN_DIST_PASS and confidence >= CONFIDENCE_PASS.",
+    "MediaPipe: higher Pearson correlation (lip openness vs audio RMS) is better; PASS when correlation >= MEDIAPIPE_CORR_THRESHOLD.",
+    "Fusion LIPSYNC_FUSION=all requires BOTH pipelines to PASS. Official VGG example.avi should PASS with sane thresholds; random YouTube rips often score worse."
+  ],
+  "quick_copy_env_for_calibration": {
+    "comment": "Paste into .env then restart uvicorn — passes VGG example.avi under fusion=all; videoplayback.mp4 still FAIL both.",
+    "lines": [
+      "MIN_DIST_PASS=6.58",
+      "CONFIDENCE_PASS=3.0",
+      "MEDIAPIPE_CORR_THRESHOLD=0.29",
+      "LIPSYNC_FUSION=all"
+    ]
+  },
+  "default_api_thresholds": {
+    "MIN_DIST_PASS": 6.0,
+    "CONFIDENCE_PASS": 3.0,
+    "MEDIAPIPE_CORR_THRESHOLD": 0.4,
+    "MEDIAPIPE_CORR_BORDERLINE": 0.25,
+    "LIPSYNC_FUSION": "all"
+  },
+  "clips": [
+    {
+      "id": "vgg_example_avi",
+      "path": "syncnet_python/data/example.avi",
+      "description": "Oxford VGG lipsync distribution sample; expect genuine A/V sync.",
+      "baseline": {
+        "source": "scripts/update_lipsync_reference_data.py --measure",
+        "syncnet": {
+          "min_dist": 6.575,
+          "confidence": 8.325,
+          "av_offset_frames": 3,
+          "tracks_evaluated": 1
+        },
+        "mediapipe": {
+          "correlation": 0.2939,
+          "frames_processed": 317,
+          "fps_used": 25.0,
+          "mediapipe_backend": "mediapipe.tasks.vision.FaceLandmarker"
+        }
+      }
+    },
+    {
+      "id": "videoplayback_mp4",
+      "path": "syncnet_python/data/videoplayback.mp4",
+      "description": "User test clip (often re-encoded / variable framing); may score poorly without looser thresholds.",
+      "baseline": {
+        "source": "scripts/update_lipsync_reference_data.py --measure",
+        "syncnet": {
+          "min_dist": 8.046,
+          "confidence": 6.434,
+          "av_offset_frames": 0,
+          "tracks_evaluated": 1
+        },
+        "mediapipe": {
+          "correlation": 0.0407,
+          "frames_processed": 1006,
+          "fps_used": 30.0,
+          "mediapipe_backend": "mediapipe.tasks.vision.FaceLandmarker"
+        }
+      }
+    }
+  ],
+  "recommended_presets": {
+    "strict_paper_defaults": {
+      "MIN_DIST_PASS": 6.0,
+      "CONFIDENCE_PASS": 3.0,
+      "MEDIAPIPE_CORR_THRESHOLD": 0.4,
+      "LIPSYNC_FUSION": "all",
+      "expected": {
+        "vgg_example_avi": "both_FAIL_marginally_syncnet_and_borderline_mp",
+        "videoplayback_mp4": "both_FAIL"
+      }
+    },
+    "calibrated_pass_vgg_fail_heavy_youtube_rip": {
+      "comment": "Passes official example on fusion=all; keeps videoplayback failing on both signals. (Any row in threshold_sweep.presets_pass_vgg_only_all works; 6.58+ gives tiny slack above 6.575.)",
+      "MIN_DIST_PASS": 6.58,
+      "CONFIDENCE_PASS": 3.0,
+      "MEDIAPIPE_CORR_THRESHOLD": 0.29,
+      "LIPSYNC_FUSION": "all",
+      "expected": {
+        "vgg_example_avi": "PASS_all",
+        "videoplayback_mp4": "FAIL_syncnet_and_mediapipe"
+      }
+    },
+    "lenient_fusion_any": {
+      "comment": "Either pipeline can save the verdict; use only after you trust each signal separately.",
+      "MIN_DIST_PASS": 6.58,
+      "CONFIDENCE_PASS": 3.0,
+      "MEDIAPIPE_CORR_THRESHOLD": 0.29,
+      "LIPSYNC_FUSION": "any",
+      "expected": {
+        "vgg_example_avi": "PASS",
+        "videoplayback_mp4": "depends_on_partial_passes"
+      }
+    }
+  },
+  "threshold_sweep": {
+    "confidence_pass_fixed": 3.0,
+    "fusion_mode_evaluated": "all",
+    "grid": [
+      {
+        "MIN_DIST_PASS": 5.5,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.2,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": false,
+            "mediapipe_pass": true,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 5.5,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.22,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": false,
+            "mediapipe_pass": true,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 5.5,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.25,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": false,
+            "mediapipe_pass": true,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 5.5,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.28,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": false,
+            "mediapipe_pass": true,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 5.5,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.29,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": false,
+            "mediapipe_pass": true,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 5.5,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.3,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 5.5,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.35,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 5.5,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.4,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.0,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.2,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": false,
+            "mediapipe_pass": true,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.0,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.22,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": false,
+            "mediapipe_pass": true,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.0,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.25,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": false,
+            "mediapipe_pass": true,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.0,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.28,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": false,
+            "mediapipe_pass": true,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.0,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.29,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": false,
+            "mediapipe_pass": true,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.0,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.3,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.0,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.35,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.0,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.4,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.25,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.2,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": false,
+            "mediapipe_pass": true,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.25,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.22,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": false,
+            "mediapipe_pass": true,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.25,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.25,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": false,
+            "mediapipe_pass": true,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.25,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.28,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": false,
+            "mediapipe_pass": true,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.25,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.29,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": false,
+            "mediapipe_pass": true,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.25,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.3,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.25,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.35,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.25,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.4,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.5,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.2,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": false,
+            "mediapipe_pass": true,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.5,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.22,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": false,
+            "mediapipe_pass": true,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.5,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.25,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": false,
+            "mediapipe_pass": true,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.5,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.28,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": false,
+            "mediapipe_pass": true,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.5,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.29,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": false,
+            "mediapipe_pass": true,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.5,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.3,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.5,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.35,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.5,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.4,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.575,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.2,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.575,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.22,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.575,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.25,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.575,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.28,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.575,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.29,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.575,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.3,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.575,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.35,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.575,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.4,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.6,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.2,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.6,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.22,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.6,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.25,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.6,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.28,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.6,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.29,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.6,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.3,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.6,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.35,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.6,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.4,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.65,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.2,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.65,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.22,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.65,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.25,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.65,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.28,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.65,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.29,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.65,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.3,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.65,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.35,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.65,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.4,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 7.0,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.2,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 7.0,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.22,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 7.0,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.25,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 7.0,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.28,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 7.0,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.29,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 7.0,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.3,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 7.0,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.35,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 7.0,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.4,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 7.5,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.2,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 7.5,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.22,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 7.5,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.25,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 7.5,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.28,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 7.5,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.29,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 7.5,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.3,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 7.5,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.35,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 7.5,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.4,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 8.0,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.2,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 8.0,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.22,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 8.0,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.25,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 8.0,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.28,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 8.0,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.29,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 8.0,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.3,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 8.0,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.35,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 8.0,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.4,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 8.5,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.2,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": true,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 8.5,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.22,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": true,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 8.5,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.25,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": true,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 8.5,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.28,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": true,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 8.5,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.29,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": true,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 8.5,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.3,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": true,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 8.5,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.35,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": true,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 8.5,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.4,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": true,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 9.0,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.2,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": true,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 9.0,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.22,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": true,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 9.0,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.25,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": true,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 9.0,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.28,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": true,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 9.0,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.29,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": true,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 9.0,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.3,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": true,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 9.0,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.35,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": true,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 9.0,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.4,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": true,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      }
+    ],
+    "summary": "Grid 12 x 8; CONFIDENCE_PASS=3.0; fusion=all",
+    "presets_pass_vgg_only_all": [
+      {
+        "MIN_DIST_PASS": 6.575,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.2,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.575,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.22,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.575,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.25,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.575,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.28,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.575,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.29,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.6,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.2,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.6,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.22,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.6,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.25,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.6,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.28,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.6,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.29,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.65,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.2,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.65,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.22,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.65,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.25,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.65,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.28,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 6.65,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.29,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 7.0,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.2,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 7.0,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.22,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 7.0,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.25,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 7.0,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.28,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 7.0,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.29,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 7.5,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.2,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 7.5,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.22,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 7.5,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.25,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 7.5,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.28,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 7.5,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.29,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 8.0,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.2,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 8.0,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.22,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 8.0,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.25,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 8.0,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.28,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 8.0,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.29,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": false,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 8.5,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.2,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": true,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 8.5,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.22,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": true,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 8.5,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.25,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": true,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 8.5,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.28,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": true,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 8.5,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.29,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": true,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 9.0,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.2,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": true,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 9.0,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.22,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": true,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 9.0,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.25,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": true,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 9.0,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.28,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": true,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      },
+      {
+        "MIN_DIST_PASS": 9.0,
+        "MEDIAPIPE_CORR_THRESHOLD": 0.29,
+        "CONFIDENCE_PASS": 3.0,
+        "clips": {
+          "vgg_example_avi": {
+            "syncnet_pass": true,
+            "mediapipe_pass": true,
+            "fusion_all_pass": true
+          },
+          "videoplayback_mp4": {
+            "syncnet_pass": true,
+            "mediapipe_pass": false,
+            "fusion_all_pass": false
+          }
+        }
+      }
+    ]
+  }
+}

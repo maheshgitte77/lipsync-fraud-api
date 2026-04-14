@@ -1,0 +1,22 @@
+.env
+.cache/
+temp_videos/
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# SyncNet is cloned + weights downloaded at deploy time (see scripts/setup_syncnet.sh).
+syncnet_python/
+
+# Large / generated artifacts (often copied beside the app by mistake)
+*.model
+*.pth
+.DS_Store
+Thumbs.db
+*.log
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.idea/
+.vscode/
