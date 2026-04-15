@@ -51,6 +51,8 @@ It should be updated whenever calculation logic changes in:
 - `durationSec`
   - Primary: `totalFrames / nativeFps`.
   - Fallback: last processed timestamp when metadata is bad.
+- `trim` (optional, merged by API when env trim is used)
+  - `trimEnabled`, `trimMaxSeconds`, `trimApplied`, `sourceDurationSec`, `analyzedDurationSec` from ffprobe + optional first-`N`s clip (`LIPSYNC_VIDEO_TRIM`, `LIPSYNC_TRIM_MAX_SECONDS`). When `trimApplied` is true, eye/head and lip-sync used only the trimmed file.
 
 ---
 

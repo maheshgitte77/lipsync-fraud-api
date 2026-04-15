@@ -66,6 +66,27 @@ Check **`GET /health`**: `model_present` should be `true` when `data/syncnet_v2.
 
 MediaPipe **Face Landmarker** `.task` files are downloaded on first use into `.cache/` (already ignored).
 
+### Faster runs on long videos (optional trim)
+
+SyncNet scales with clip length. To cap work to the **opening segment** only (one continuous trim from `t=0`, not multiple tiles):
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `LIPSYNC_VIDEO_TRIM` | off | Set to `true` / `1` / `yes` to enable. |
+| `LIPSYNC_TRIM_MAX_SECONDS` | `15` | Maximum seconds kept (clamped 1–600). Shorter uploads are unchanged. |
+| `LIPSYNC_WINDOW_POSITION` | `start` | Where the single SyncNet window comes from: `start`, `middle`, or `end`. |
+
+When enabled, SyncNet uses exactly one window from the original video (`LIPSYNC_TRIM_MAX_SECONDS` long, clamped by source length) at the selected position. MediaPipe lip-sync and proctor eye/head continue to use the original full video.
+
+Example with `LIPSYNC_TRIM_MAX_SECONDS=15`:
+- 82s video + `start`  -> `0s..15s`
+- 82s video + `middle` -> `33.7s..48.7s`
+- 82s video + `end`    -> `67s..82s`
+
+**Trade-off:** trim/windowing can miss cheating outside sampled SyncNet windows. Since MediaPipe/proctor still run on the full video, cross-signal comparisons can differ by coverage window.
+
+Responses: `POST /analyze` includes `video_trim` `{ trimEnabled, trimMaxSeconds, trimApplied, sourceDurationSec, analyzedDurationSec }`. `POST /analyze/proctor-signals` merges the same object under `videoMeta.trim`.
+
 ## AWS EC2 (Ubuntu 22.04)
 
 Typical flow:

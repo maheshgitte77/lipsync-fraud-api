@@ -10,6 +10,7 @@ Env:
   LIPSYNC_FUSION=any|all|syncnet_only|mediapipe_only|best  (default: any)
   MEDIAPIPE_CORR_THRESHOLD=0.4
   MIN_DIST_PASS, CONFIDENCE_PASS — SyncNet thresholds
+  LIPSYNC_VIDEO_TRIM=true|false — if true, SyncNet analyzes only first LIPSYNC_TRIM_MAX_SECONDS (default 15); MediaPipe/proctor still use original video.
 """
 
 from __future__ import annotations
@@ -28,9 +29,13 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from urllib.parse import urlparse
+from datetime import datetime, timezone
+import logging
+import json
+from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 
 from fastapi import Body, FastAPI, File, HTTPException, UploadFile
@@ -85,6 +90,13 @@ PROCTOR_SKIP_SYNCNET = os.environ.get("PROCTOR_SKIP_SYNCNET", "").lower() in (
     "true",
     "yes",
 )
+# Trim long videos to the first N seconds (single clip) before SyncNet / MediaPipe / proctor — faster, less RAM.
+LIPSYNC_VIDEO_TRIM = os.environ.get("LIPSYNC_VIDEO_TRIM", "").lower() in ("1", "true", "yes")
+LIPSYNC_TRIM_MAX_SECONDS = float(os.environ.get("LIPSYNC_TRIM_MAX_SECONDS", "15"))
+LIPSYNC_FFPROBE = (os.environ.get("LIPSYNC_FFPROBE") or "ffprobe").strip() or "ffprobe"
+LIPSYNC_WINDOW_POSITION = os.environ.get("LIPSYNC_WINDOW_POSITION", "start").strip().lower()
+if LIPSYNC_WINDOW_POSITION not in {"start", "middle", "end"}:
+    LIPSYNC_WINDOW_POSITION = "start"
 
 
 def _syncnet_pipeline_cli_extras() -> list[str]:
@@ -116,6 +128,484 @@ def _syncnet_run_syncnet_cli_extras() -> list[str]:
 
 ALLOWED_EXT = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
 
+_TRIM_OUT_NAME = "trimmed_for_analysis.mp4"
+
+
+def _ffprobe_duration_sec(path: Path) -> float | None:
+    try:
+        r = subprocess.run(
+            [
+                LIPSYNC_FFPROBE,
+                "-v",
+                "error",
+                "-print_format",
+                "json",
+                "-show_format",
+                "-show_streams",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if r.returncode != 0:
+            return None
+        raw = (r.stdout or "").strip()
+        if not raw:
+            return None
+        doc = json.loads(raw)
+        fmt = doc.get("format") or {}
+        s = fmt.get("duration")
+        if s not in (None, "", "N/A"):
+            d = float(s)
+            if d > 0:
+                return d
+        for st in doc.get("streams") or []:
+            if st.get("codec_type") != "video":
+                continue
+            ds = st.get("duration")
+            if ds in (None, "", "N/A"):
+                continue
+            d2 = float(ds)
+            if d2 > 0:
+                return d2
+        return None
+    except (ValueError, subprocess.TimeoutExpired, OSError):
+        return None
+
+
+def _opencv_duration_sec(path: Path) -> float | None:
+    """Fallback duration probe when ffprobe cannot read container metadata."""
+    try:
+        import cv2
+
+        cap = cv2.VideoCapture(str(path))
+        if not cap.isOpened():
+            return None
+        fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+        frames = float(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0.0)
+        cap.release()
+        if fps > 0.1 and frames > 0:
+            return frames / fps
+    except Exception:
+        return None
+    return None
+
+
+def _video_duration_sec(path: Path) -> float | None:
+    """Primary ffprobe duration with OpenCV fallback for problematic WebM metadata."""
+    d = _ffprobe_duration_sec(path)
+    if d is not None and d > 0:
+        logger.info("[DURATION_PROBE] %s", {"path": str(path), "source": "ffprobe", "durationSec": round(d, 3)})
+        return d
+    d2 = _opencv_duration_sec(path)
+    logger.info("[DURATION_PROBE] %s", {"path": str(path), "source": "opencv_fallback", "durationSec": None if d2 is None else round(d2, 3)})
+    return d2
+
+
+def _guess_video_extension_from_url(video_url: str) -> str:
+    """Infer extension from URL path or query string hints."""
+    parsed = urlparse(video_url)
+    ext = Path(parsed.path).suffix.lower()
+    if ext in ALLOWED_EXT:
+        return ext
+    qs = parse_qs(parsed.query or "")
+    for key in ("filename", "file", "name"):
+        vals = qs.get(key) or []
+        for v in vals:
+            qext = Path(v).suffix.lower()
+            if qext in ALLOWED_EXT:
+                return qext
+    return ".mp4"
+
+
+def _ffmpeg_trim_video_head(src: Path, dest: Path, seconds: float) -> None:
+    """Write the first `seconds` of `src` to `dest`. Prefer stream copy; fall back to H.264/AAC."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.is_file():
+        dest.unlink()
+    t = str(max(0.5, seconds))
+    copy_cmd = [
+        LIPSYNC_FFMPEG,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        str(src),
+        "-t",
+        t,
+        "-c",
+        "copy",
+        str(dest),
+    ]
+    r = subprocess.run(
+        copy_cmd,
+        capture_output=True,
+        text=True,
+        timeout=600,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if r.returncode == 0 and dest.is_file() and dest.stat().st_size > 256:
+        return
+    err_copy = (r.stderr or "") + (r.stdout or "")
+    if dest.is_file():
+        dest.unlink()
+    enc_cmd = [
+        LIPSYNC_FFMPEG,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        str(src),
+        "-t",
+        t,
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "23",
+        "-c:a",
+        "aac",
+        "-ar",
+        "44100",
+        "-movflags",
+        "+faststart",
+        str(dest),
+    ]
+    r2 = subprocess.run(
+        enc_cmd,
+        capture_output=True,
+        text=True,
+        timeout=3600,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if r2.returncode != 0 or not dest.is_file() or dest.stat().st_size < 256:
+        err2 = (r2.stderr or "") + (r2.stdout or "")
+        raise RuntimeError(
+            "ffmpeg trim failed (copy and re-encode). "
+            f"copy_err={err_copy[-1500:]!r} encode_err={err2[-1500:]!r}"
+        )
+
+
+def _ffmpeg_trim_video_segment(src: Path, dest: Path, start_sec: float, seconds: float) -> None:
+    """Write segment [start_sec, start_sec + seconds) from src to dest."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.is_file():
+        dest.unlink()
+    start = str(max(0.0, start_sec))
+    dur = str(max(0.5, seconds))
+    copy_cmd = [
+        LIPSYNC_FFMPEG,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-ss",
+        start,
+        "-i",
+        str(src),
+        "-t",
+        dur,
+        "-c",
+        "copy",
+        str(dest),
+    ]
+    r = subprocess.run(
+        copy_cmd,
+        capture_output=True,
+        text=True,
+        timeout=1200,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if r.returncode == 0 and dest.is_file() and dest.stat().st_size > 256:
+        return
+    err_copy = (r.stderr or "") + (r.stdout or "")
+    if dest.is_file():
+        dest.unlink()
+    enc_cmd = [
+        LIPSYNC_FFMPEG,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-ss",
+        start,
+        "-i",
+        str(src),
+        "-t",
+        dur,
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "23",
+        "-c:a",
+        "aac",
+        "-ar",
+        "44100",
+        "-movflags",
+        "+faststart",
+        str(dest),
+    ]
+    r2 = subprocess.run(
+        enc_cmd,
+        capture_output=True,
+        text=True,
+        timeout=3600,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if r2.returncode != 0 or not dest.is_file() or dest.stat().st_size < 256:
+        err2 = (r2.stderr or "") + (r2.stdout or "")
+        raise RuntimeError(
+            "ffmpeg segment trim failed (copy and re-encode). "
+            f"copy_err={err_copy[-1500:]!r} encode_err={err2[-1500:]!r}"
+        )
+
+
+def _normalize_for_syncnet(src: Path, job_dir: Path, job_id: str) -> Path:
+    """
+    Normalize source into a duration-friendly container for probing/windowing.
+    Try fast remux first, then transcode fallback.
+    """
+    remux_out = job_dir / "syncnet_source.mkv"
+    if remux_out.is_file():
+        remux_out.unlink()
+    remux_cmd = [
+        LIPSYNC_FFMPEG,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        str(src),
+        "-map",
+        "0",
+        "-c",
+        "copy",
+        str(remux_out),
+    ]
+    remux_start = time.perf_counter()
+    r1 = subprocess.run(
+        remux_cmd,
+        capture_output=True,
+        text=True,
+        timeout=1800,
+        encoding="utf-8",
+        errors="replace",
+    )
+    remux_dur = _video_duration_sec(remux_out) if r1.returncode == 0 and remux_out.is_file() else None
+    _log_timing(
+        job_id,
+        "syncnet_normalize_remux",
+        remux_start,
+        returncode=r1.returncode,
+        durationSec=remux_dur,
+        outputPath=str(remux_out),
+    )
+    if r1.returncode == 0 and remux_out.is_file() and remux_dur and remux_dur > 0:
+        return remux_out
+
+    trans_out = job_dir / "syncnet_source.mp4"
+    if trans_out.is_file():
+        trans_out.unlink()
+    trans_cmd = [
+        LIPSYNC_FFMPEG,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        str(src),
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a:0?",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "23",
+        "-c:a",
+        "aac",
+        "-ar",
+        "44100",
+        "-movflags",
+        "+faststart",
+        str(trans_out),
+    ]
+    trans_start = time.perf_counter()
+    r2 = subprocess.run(
+        trans_cmd,
+        capture_output=True,
+        text=True,
+        timeout=3600,
+        encoding="utf-8",
+        errors="replace",
+    )
+    trans_dur = _video_duration_sec(trans_out) if r2.returncode == 0 and trans_out.is_file() else None
+    _log_timing(
+        job_id,
+        "syncnet_normalize_transcode",
+        trans_start,
+        returncode=r2.returncode,
+        durationSec=trans_dur,
+        outputPath=str(trans_out),
+    )
+    if r2.returncode == 0 and trans_out.is_file() and trans_dur and trans_dur > 0:
+        return trans_out
+
+    err = (r2.stderr or "") + (r2.stdout or "") + "\n" + (r1.stderr or "") + (r1.stdout or "")
+    raise RuntimeError(f"SyncNet normalization failed; no valid duration after remux/transcode. {err[-2000:]}")
+
+
+def _build_syncnet_window(duration_sec: float) -> dict | None:
+    """
+    Build exactly one SyncNet window based on:
+      - LIPSYNC_TRIM_MAX_SECONDS
+      - LIPSYNC_WINDOW_POSITION (start|middle|end)
+    """
+    duration = max(0.0, duration_sec)
+    if duration <= 0.0:
+        return None
+
+    only_dur = min(max(1.0, min(LIPSYNC_TRIM_MAX_SECONDS, 600.0)), duration)
+    if LIPSYNC_WINDOW_POSITION == "middle":
+        start = max(0.0, (duration - only_dur) / 2.0)
+    elif LIPSYNC_WINDOW_POSITION == "end":
+        start = max(0.0, duration - only_dur)
+    else:
+        start = 0.0
+    return {"startSec": round(start, 3), "durationSec": round(only_dur, 3)}
+
+
+def _prepare_analysis_video(video_path: Path, job_dir: Path) -> tuple[Path, dict]:
+    """
+    Optionally replace `video_path` with a shorter MP4 (first N seconds only).
+    Returns (path_to_use, metadata dict for API responses).
+    """
+    max_sec = max(1.0, min(LIPSYNC_TRIM_MAX_SECONDS, 600.0))
+    meta: dict = {
+        "trimEnabled": bool(LIPSYNC_VIDEO_TRIM),
+        "trimMaxSeconds": max_sec,
+        "trimApplied": False,
+        "sourceDurationSec": None,
+        "analyzedDurationSec": None,
+    }
+    src_dur = _ffprobe_duration_sec(video_path)
+    meta["sourceDurationSec"] = src_dur
+
+    if not LIPSYNC_VIDEO_TRIM:
+        meta["analyzedDurationSec"] = src_dur
+        return video_path, meta
+
+    need_trim = src_dur is None or src_dur > max_sec + 0.05
+    if not need_trim:
+        meta["analyzedDurationSec"] = src_dur
+        return video_path, meta
+
+    out = job_dir / _TRIM_OUT_NAME
+    _ffmpeg_trim_video_head(video_path, out, max_sec)
+    meta["trimApplied"] = True
+    meta["analyzedDurationSec"] = _ffprobe_duration_sec(out) or max_sec
+    return out, meta
+
+
+def _prepare_syncnet_window_paths(video_path: Path, job_dir: Path) -> tuple[list[dict], dict]:
+    """
+    Prepare one or more inputs for SyncNet.
+    Returns:
+      - list of {path, startSec, durationSec}
+      - metadata about windowing behavior for API response
+    """
+    src_dur = _video_duration_sec(video_path)
+    max_sec = max(1.0, min(LIPSYNC_TRIM_MAX_SECONDS, 600.0))
+    meta: dict = {
+        "singleWindowMode": True,
+        "position": LIPSYNC_WINDOW_POSITION,
+        "trimEnabled": bool(LIPSYNC_VIDEO_TRIM),
+        "trimMaxSeconds": max_sec,
+        "sourceDurationSec": src_dur,
+        "applied": False,
+        "count": 1,
+    }
+    if not LIPSYNC_VIDEO_TRIM or src_dur is None:
+        logger.info(
+            "[SYNCNET_WINDOW] %s",
+            {
+                "path": str(video_path),
+                "trimEnabled": LIPSYNC_VIDEO_TRIM,
+                "sourceDurationSec": src_dur,
+                "applied": False,
+                "reason": "trim_disabled_or_duration_unavailable",
+            },
+        )
+        return [{"path": video_path, "startSec": 0.0, "durationSec": src_dur}], meta
+
+    win = _build_syncnet_window(src_dur)
+    if not win:
+        logger.info(
+            "[SYNCNET_WINDOW] %s",
+            {
+                "path": str(video_path),
+                "sourceDurationSec": src_dur,
+                "applied": False,
+                "reason": "window_builder_returned_none",
+            },
+        )
+        return [{"path": video_path, "startSec": 0.0, "durationSec": src_dur}], meta
+
+    # If selected window is effectively full source, skip segment extraction.
+    if float(win["startSec"]) <= 0.001 and src_dur <= max_sec + 0.05:
+        logger.info(
+            "[SYNCNET_WINDOW] %s",
+            {
+                "path": str(video_path),
+                "sourceDurationSec": src_dur,
+                "applied": False,
+                "reason": "window_equals_full_source",
+                "window": win,
+            },
+        )
+        return [{"path": video_path, "startSec": 0.0, "durationSec": src_dur}], meta
+
+    seg = job_dir / "syncnet_window_1.mp4"
+    _ffmpeg_trim_video_segment(
+        video_path,
+        seg,
+        start_sec=float(win["startSec"]),
+        seconds=float(win["durationSec"]),
+    )
+    meta["applied"] = True
+    logger.info(
+        "[SYNCNET_WINDOW] %s",
+        {
+            "path": str(video_path),
+            "sourceDurationSec": src_dur,
+            "applied": True,
+            "window": win,
+            "outputPath": str(seg),
+        },
+    )
+    return [
+        {
+            "path": seg,
+            "startSec": float(win["startSec"]),
+            "durationSec": float(win["durationSec"]),
+        }
+    ], meta
+
+
 _SYNCNET_BLOCK = re.compile(
     r"AV offset:\s*([-\d]+)\s*\n\s*Min dist:\s*([\d.]+)\s*\n\s*Confidence:\s*([\d.]+)",
     re.MULTILINE,
@@ -126,6 +616,36 @@ app = FastAPI(
     description="Upload interview video; SyncNet + lip–audio correlation; fused PASS/FAIL.",
     version="1.1.0",
 )
+
+logger = logging.getLogger("uvicorn.error")
+if logger.level > logging.INFO:
+    logger.setLevel(logging.INFO)
+
+
+def _utc_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+
+
+def _log_timing(job_id: str, step: str, started_at: float, **extra: object) -> None:
+    elapsed_ms = round((time.perf_counter() - started_at) * 1000.0, 2)
+    payload = {
+        "ts": _utc_iso(),
+        "jobId": job_id,
+        "step": step,
+        "elapsed_ms": elapsed_ms,
+        **extra,
+    }
+    logger.info("[PROCTOR_TIMING] %s", payload)
+
+
+def _log_event(job_id: str, step: str, **extra: object) -> None:
+    payload = {
+        "ts": _utc_iso(),
+        "jobId": job_id,
+        "step": step,
+        **extra,
+    }
+    logger.info("[PROCTOR_EVENT] %s", payload)
 
 
 @app.get("/")
@@ -336,6 +856,102 @@ def _safe_syncnet(video_path: Path, reference: str, job_dir: Path) -> dict:
         return {"passed": False, "verdict": "ERROR", "error": str(e)[:8000], "scores": {}}
 
 
+def _safe_syncnet_multi_window(video_path: Path, reference: str, job_dir: Path) -> dict:
+    """Runs SyncNet with single-position window mode (or full source if trim off)."""
+    try:
+        windows, windowing = _prepare_syncnet_window_paths(video_path, job_dir)
+    except Exception as e:
+        return {"passed": False, "verdict": "ERROR", "error": str(e)[:8000], "scores": {}}
+
+    if len(windows) == 1:
+        single = _safe_syncnet(Path(windows[0]["path"]), reference, job_dir / "w0")
+        single["windowing"] = {
+            **windowing,
+            "windows": [
+                {
+                    "index": 1,
+                    "startSec": windows[0]["startSec"],
+                    "durationSec": windows[0]["durationSec"],
+                }
+            ],
+        }
+        return single
+
+    results: list[dict] = []
+    for idx, w in enumerate(windows):
+        res = _safe_syncnet(
+            Path(w["path"]),
+            f"{reference}_w{idx + 1}",
+            job_dir / f"w{idx + 1}",
+        )
+        results.append(
+            {
+                "index": idx + 1,
+                "startSec": w["startSec"],
+                "durationSec": w["durationSec"],
+                "result": res,
+            }
+        )
+
+    ok_results = [r for r in results if "error" not in r["result"]]
+    if not ok_results:
+        first_err = results[0]["result"].get("error", "No SyncNet window produced a score")
+        return {
+            "passed": False,
+            "verdict": "ERROR",
+            "error": first_err,
+            "scores": {},
+            "windowing": {
+                **windowing,
+                "windows": [
+                    {
+                        "index": r["index"],
+                        "startSec": r["startSec"],
+                        "durationSec": r["durationSec"],
+                        "verdict": r["result"].get("verdict"),
+                        "passed": r["result"].get("passed"),
+                        "error": r["result"].get("error"),
+                    }
+                    for r in results
+                ],
+            },
+        }
+
+    agg_track = {
+        "av_offset_frames": 0,
+        "min_dist": max(float(r["result"]["scores"].get("min_dist", 999.0)) for r in ok_results),
+        "confidence": min(float(r["result"]["scores"].get("confidence", 0.0)) for r in ok_results),
+        "tracks_evaluated": sum(int(r["result"]["scores"].get("tracks_evaluated", 0)) for r in ok_results),
+        "mean_abs_offset_frames": round(
+            sum(float(r["result"]["scores"].get("mean_abs_offset_frames", 0.0)) for r in ok_results)
+            / max(len(ok_results), 1),
+            3,
+        ),
+    }
+    agg_verdict = build_verdict(agg_track)
+    if any(r["result"].get("passed") is False for r in ok_results):
+        agg_verdict["reason"] += " Dynamic windowing observed at least one failing window."
+
+    agg_verdict["windowing"] = {
+        **windowing,
+        "syncnetTrimEnabled": bool(LIPSYNC_VIDEO_TRIM),
+        "syncnetTrimMaxSeconds": max(1.0, min(LIPSYNC_TRIM_MAX_SECONDS, 600.0)),
+        "windows": [
+            {
+                "index": r["index"],
+                "startSec": r["startSec"],
+                "durationSec": r["durationSec"],
+                "verdict": r["result"].get("verdict"),
+                "passed": r["result"].get("passed"),
+                "error": r["result"].get("error"),
+                "scores": r["result"].get("scores", {}),
+            }
+            for r in results
+        ],
+    }
+    return agg_verdict
+
+
 def _mediapipe_skipped_result(reason: str = "MediaPipe lip-sync skipped by configuration") -> dict:
     return {
         "skipped": True,
@@ -456,17 +1072,65 @@ async def analyze_proctor_signals(payload: ProctorSignalsRequest = Body(...)):
     reference = f"cand_{job_id}"
     job_dir = TEMP_DIR / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
-    video_path = job_dir / "input.mp4"
+    ext = _guess_video_extension_from_url(payload.videoUrl)
+    video_path = job_dir / f"input{ext}"
+    req_started = time.perf_counter()
+    _log_event(
+        job_id,
+        "request_received",
+        endpoint="/analyze/proctor-signals",
+        skipSyncNetRequest=payload.skipSyncNet,
+        sampleFps=payload.sampleFps,
+        offscreenRatioThreshold=payload.offscreenRatioThreshold,
+        improperHeadRatioThreshold=payload.improperHeadRatioThreshold,
+        repetitivePatternThreshold=payload.repetitivePatternThreshold,
+        inputExt=ext,
+    )
 
     try:
+        t_download = time.perf_counter()
         _download_video_from_url(payload.videoUrl, video_path)
+        _log_timing(
+            job_id,
+            "download_video",
+            t_download,
+            bytes=video_path.stat().st_size if video_path.is_file() else None,
+            savedPath=str(video_path),
+        )
+        t_syncnet_norm = time.perf_counter()
+        syncnet_path = _normalize_for_syncnet(video_path, job_dir, job_id)
+        _log_timing(job_id, "syncnet_normalize_total", t_syncnet_norm, outputPath=str(syncnet_path))
+        t_thresholds = time.perf_counter()
         thresholds = _build_proctor_thresholds(payload)
+        _log_timing(
+            job_id,
+            "build_thresholds",
+            t_thresholds,
+            sampleFps=thresholds.sample_fps,
+            offscreenRatioThreshold=thresholds.offscreen_ratio_threshold,
+            improperHeadRatioThreshold=thresholds.improper_head_ratio_threshold,
+            repetitivePatternThreshold=thresholds.repetitive_pattern_threshold,
+        )
 
         skip_sn = PROCTOR_SKIP_SYNCNET or (payload.skipSyncNet is True)
+        _log_event(
+            job_id,
+            "runtime_flags",
+            skipSyncNetResolved=skip_sn,
+            envSkipSyncNet=PROCTOR_SKIP_SYNCNET,
+            payloadSkipSyncNet=payload.skipSyncNet,
+            fusionMode=LIPSYNC_FUSION,
+            mediapipeLipSyncDisabled=LIPSYNC_DISABLE_MEDIAPIPE_LIPSYNC,
+            syncnetWindowPosition=LIPSYNC_WINDOW_POSITION,
+            syncnetTrimEnabled=LIPSYNC_VIDEO_TRIM,
+            syncnetTrimMaxSeconds=LIPSYNC_TRIM_MAX_SECONDS,
+        )
 
         if skip_sn:
             skip_mp_lipsync = _should_skip_mediapipe_lipsync("mediapipe_only")
+            t_parallel = time.perf_counter()
             with ThreadPoolExecutor(max_workers=1 if skip_mp_lipsync else 2) as pool:
+                fut_pose_start = time.perf_counter()
                 fut_pose = pool.submit(analyze_eye_head_pose, video_path, thresholds)
                 fut_mp = (
                     None
@@ -474,11 +1138,30 @@ async def analyze_proctor_signals(payload: ProctorSignalsRequest = Body(...)):
                     else pool.submit(_safe_mediapipe, video_path)
                 )
                 pose_result = fut_pose.result()
+                _log_timing(
+                    job_id,
+                    "pose_analysis",
+                    fut_pose_start,
+                    sampledFrames=pose_result.get("videoMeta", {}).get("sampledFrames"),
+                    nativeFps=pose_result.get("videoMeta", {}).get("nativeFps"),
+                    sampleFps=pose_result.get("videoMeta", {}).get("sampleFps"),
+                    durationSec=pose_result.get("videoMeta", {}).get("durationSec"),
+                )
                 mediapipe_result = (
                     _mediapipe_skipped_result()
                     if skip_mp_lipsync
                     else fut_mp.result()
                 )
+                if skip_mp_lipsync:
+                    _log_event(job_id, "mediapipe_lipsync_skipped", reason="syncnet skipped path")
+                else:
+                    _log_timing(
+                        job_id,
+                        "mediapipe_lipsync",
+                        fut_pose_start,
+                        verdict=mediapipe_result.get("verdict"),
+                    )
+            _log_timing(job_id, "parallel_stage_total", t_parallel, skipSyncNet=True)
             # No "error" key — keeps _fuse sn_ok True under mediapipe_only
             syncnet_out = {"skipped": True, "passed": False, "scores": {}}
             fused_lipsync = _fuse(syncnet_out, mediapipe_result, "mediapipe_only")
@@ -489,21 +1172,52 @@ async def analyze_proctor_signals(payload: ProctorSignalsRequest = Body(...)):
                 "syncnet_only" if skip_mp_lipsync else requested_fusion_mode
             )
 
+            t_parallel = time.perf_counter()
             with ThreadPoolExecutor(max_workers=2 if skip_mp_lipsync else 3) as pool:
                 fut_mp = (
                     None
                     if skip_mp_lipsync
                     else pool.submit(_safe_mediapipe, video_path)
                 )
-                fut_sn = pool.submit(_safe_syncnet, video_path, reference, job_dir)
+                fut_sn_start = time.perf_counter()
+                fut_sn = pool.submit(_safe_syncnet_multi_window, syncnet_path, reference, job_dir)
+                fut_pose_start = time.perf_counter()
                 fut_pose = pool.submit(analyze_eye_head_pose, video_path, thresholds)
                 syncnet_result = fut_sn.result()
+                _log_timing(
+                    job_id,
+                    "syncnet_analysis",
+                    fut_sn_start,
+                    verdict=syncnet_result.get("verdict"),
+                    minDist=(syncnet_result.get("scores") or {}).get("min_dist"),
+                    confidence=(syncnet_result.get("scores") or {}).get("confidence"),
+                    windowing=syncnet_result.get("windowing"),
+                )
                 pose_result = fut_pose.result()
+                _log_timing(
+                    job_id,
+                    "pose_analysis",
+                    fut_pose_start,
+                    sampledFrames=pose_result.get("videoMeta", {}).get("sampledFrames"),
+                    nativeFps=pose_result.get("videoMeta", {}).get("nativeFps"),
+                    sampleFps=pose_result.get("videoMeta", {}).get("sampleFps"),
+                    durationSec=pose_result.get("videoMeta", {}).get("durationSec"),
+                )
                 mediapipe_result = (
                     _mediapipe_skipped_result()
                     if skip_mp_lipsync
                     else fut_mp.result()
                 )
+                if skip_mp_lipsync:
+                    _log_event(job_id, "mediapipe_lipsync_skipped", reason="fusion syncnet_only")
+                else:
+                    _log_timing(
+                        job_id,
+                        "mediapipe_lipsync",
+                        fut_sn_start,
+                        verdict=mediapipe_result.get("verdict"),
+                    )
+            _log_timing(job_id, "parallel_stage_total", t_parallel, skipSyncNet=False)
 
             syncnet_out = {k: v for k, v in syncnet_result.items() if k != "all_tracks"}
             fused_lipsync = _fuse(syncnet_out, mediapipe_result, effective_fusion_mode)
@@ -579,6 +1293,14 @@ async def analyze_proctor_signals(payload: ProctorSignalsRequest = Body(...)):
         suspicious = len(flags) > 0
         verdict = "SUSPECT" if suspicious else "CLEAR"
         confidence = 0.88 if suspicious else 0.2
+        _log_timing(
+            job_id,
+            "request_complete",
+            req_started,
+            verdict=verdict,
+            suspicious=suspicious,
+            signalCount=len(flags),
+        )
 
         return JSONResponse(
             content={
@@ -616,6 +1338,7 @@ async def analyze_proctor_signals(payload: ProctorSignalsRequest = Body(...)):
             }
         )
     except Exception as exc:
+        _log_timing(job_id, "request_failed", req_started, error=str(exc)[:500])
         raise HTTPException(status_code=422, detail=str(exc)[:4000]) from exc
     finally:
         shutil.rmtree(job_dir, ignore_errors=True)
@@ -649,6 +1372,21 @@ async def analyze_video(file: UploadFile = File(...)):
         with open(video_path, "wb") as f:
             shutil.copyfileobj(file.file, f)
 
+        t_syncnet_norm = time.perf_counter()
+        syncnet_path = _normalize_for_syncnet(video_path, job_dir, job_id)
+        _log_timing(job_id, "syncnet_normalize_total", t_syncnet_norm, outputPath=str(syncnet_path))
+        src_dur = _video_duration_sec(syncnet_path)
+        win = _build_syncnet_window(src_dur or 0.0) if LIPSYNC_VIDEO_TRIM else None
+        syncnet_trim_meta = {
+            "trimEnabled": bool(LIPSYNC_VIDEO_TRIM),
+            "trimMaxSeconds": max(1.0, min(LIPSYNC_TRIM_MAX_SECONDS, 600.0)),
+            "trimApplied": bool(LIPSYNC_VIDEO_TRIM and win and (float(win["startSec"]) > 0.001 or (src_dur or 0.0) > float(win["durationSec"]) + 0.05)),
+            "sourceDurationSec": src_dur,
+            "analyzedDurationSec": (float(win["durationSec"]) if win else src_dur),
+            "position": LIPSYNC_WINDOW_POSITION,
+            "singleWindowMode": True,
+        }
+
         requested_fusion_mode = LIPSYNC_FUSION
         skip_mp_lipsync = _should_skip_mediapipe_lipsync(requested_fusion_mode)
         effective_fusion_mode = "syncnet_only" if skip_mp_lipsync else requested_fusion_mode
@@ -659,7 +1397,7 @@ async def analyze_video(file: UploadFile = File(...)):
                 if skip_mp_lipsync
                 else pool.submit(_safe_mediapipe, video_path)
             )
-            fut_sn = pool.submit(_safe_syncnet, video_path, reference, job_dir)
+            fut_sn = pool.submit(_safe_syncnet_multi_window, syncnet_path, reference, job_dir)
             syncnet_result = fut_sn.result()
             mediapipe_result = (
                 _mediapipe_skipped_result()
@@ -677,6 +1415,7 @@ async def analyze_video(file: UploadFile = File(...)):
         body = {
             "job_id": job_id,
             "file": file.filename,
+            "video_trim": syncnet_trim_meta,
             "verdict": final["verdict"],
             "passed": final["passed"],
             "reason": final["reason"],
