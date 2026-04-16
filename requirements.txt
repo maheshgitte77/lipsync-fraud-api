@@ -8,6 +8,8 @@ python-dotenv>=1.0.0
 mediapipe>=0.10.0
 librosa>=0.10.0
 soundfile>=0.12.0
+kafka-python>=2.0.2
+redis>=5.0.0
 
 # SyncNet pipeline (run in the same environment as uvicorn):
 #   pip install -r syncnet_python/requirements.txt

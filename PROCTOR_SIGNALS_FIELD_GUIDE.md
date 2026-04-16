@@ -253,3 +253,14 @@ Decision:
 ## 11) Maintenance Rule
 
 If you change any formula, threshold semantics, or flag condition in code, update this file in the same commit.
+
+
+
+Implemented rules:
+
+LIP_SYNC_MISMATCH if lipSync.syncnet.passed == false
+READING_FROM_EXTERNAL if reliable and:
+(offScreenRatio >= offscreenRatioThreshold AND repetitivePatternCount >= repetitivePatternThreshold)
+OR readingPatternScore >= 0.60
+EYE_MOVEMENT if (LEFT+RIGHT+UP+DOWN)/validEyeFrames >= 0.5
+IMPROPER_HEAD_POSE if improperHeadRatio >= improperHeadRatioThreshold

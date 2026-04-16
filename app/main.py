@@ -28,9 +28,12 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import uuid
+import threading
 from concurrent.futures import ThreadPoolExecutor
 import json
+import socket
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 
@@ -76,6 +79,48 @@ LIPSYNC_FFPROBE = (os.environ.get("LIPSYNC_FFPROBE") or "ffprobe").strip() or "f
 LIPSYNC_WINDOW_POSITION = os.environ.get("LIPSYNC_WINDOW_POSITION", "start").strip().lower()
 if LIPSYNC_WINDOW_POSITION not in {"start", "middle", "end"}:
     LIPSYNC_WINDOW_POSITION = "start"
+LIPSYNC_DOWNLOAD_TIMEOUT_SEC = int(os.environ.get("LIPSYNC_DOWNLOAD_TIMEOUT_SEC", "600"))
+LIPSYNC_DOWNLOAD_RETRIES = int(os.environ.get("LIPSYNC_DOWNLOAD_RETRIES", "3"))
+
+# Optional Kafka async mode for proctor-signals load handling
+PROCTOR_KAFKA_ENABLED = os.environ.get("PROCTOR_KAFKA_ENABLED", "").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+PROCTOR_KAFKA_START_WORKER = os.environ.get("PROCTOR_KAFKA_START_WORKER", "").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+PROCTOR_KAFKA_BROKERS = (
+    os.environ.get("PROCTOR_KAFKA_BROKERS")
+    or os.environ.get("KAFKA_BROKERS")
+    or os.environ.get("KAFKA_BROKER")
+    or "localhost:9092"
+)
+PROCTOR_KAFKA_REQUEST_TOPIC = os.environ.get(
+    "PROCTOR_KAFKA_REQUEST_TOPIC", "proctor.signals.requests"
+)
+PROCTOR_KAFKA_RESULT_TOPIC = os.environ.get(
+    "PROCTOR_KAFKA_RESULT_TOPIC", "proctor.signals.results"
+)
+PROCTOR_KAFKA_GROUP = os.environ.get(
+    "PROCTOR_KAFKA_GROUP", "lipsync-fraud-proctor-workers"
+)
+PROCTOR_JOB_STORE_PREFIX = os.environ.get("PROCTOR_JOB_STORE_PREFIX", "proctor:job")
+PROCTOR_JOB_TTL_SEC = int(os.environ.get("PROCTOR_JOB_TTL_SEC", "86400"))
+REDIS_URL = (os.environ.get("REDIS_URL") or "").strip()
+REDIS_HOST = (os.environ.get("REDIS_HOST") or "").strip()
+REDIS_PORT = int(os.environ.get("REDIS_PORT", "6379"))
+REDIS_USERNAME = (os.environ.get("REDIS_USERNAME") or "").strip()
+REDIS_PASSWORD = (os.environ.get("REDIS_PASSWORD") or "").strip()
+
+_kafka_thread_stop = threading.Event()
+_job_store_lock = threading.Lock()
+_job_store: dict[str, dict] = {}
+_redis_client = None
+_redis_disabled = False
 
 
 def _syncnet_pipeline_cli_extras() -> list[str]:
@@ -827,9 +872,34 @@ def _download_video_from_url(video_url: str, destination: Path) -> None:
     if parsed.scheme not in ("http", "https"):
         raise ValueError("videoUrl must be http/https")
 
-    req = Request(video_url, headers={"User-Agent": "lipsync-fraud-api/1.2"})
-    with urlopen(req, timeout=180) as response, open(destination, "wb") as out:
-        shutil.copyfileobj(response, out)
+    req = Request(video_url, headers={"User-Agent": "lipsync-fraud-api/1.2", "Connection": "close"})
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    timeout_sec = max(30, LIPSYNC_DOWNLOAD_TIMEOUT_SEC)
+    retries = max(1, LIPSYNC_DOWNLOAD_RETRIES)
+    last_err: Exception | None = None
+
+    for attempt in range(1, retries + 1):
+        try:
+            with urlopen(req, timeout=timeout_sec) as response, open(destination, "wb") as out:
+                while True:
+                    chunk = response.read(1024 * 1024)  # 1MB chunks
+                    if not chunk:
+                        break
+                    out.write(chunk)
+            if destination.is_file() and destination.stat().st_size > 0:
+                return
+            raise RuntimeError("download completed with empty file")
+        except (TimeoutError, socket.timeout, OSError, RuntimeError) as exc:
+            last_err = exc
+            if destination.exists():
+                destination.unlink(missing_ok=True)
+            if attempt >= retries:
+                break
+            time.sleep(min(2 * attempt, 5))
+
+    raise RuntimeError(
+        f"video download failed after {retries} attempts (timeout={timeout_sec}s): {last_err}"
+    )
 
 
 class ProctorSignalsRequest(BaseModel):
@@ -841,6 +911,115 @@ class ProctorSignalsRequest(BaseModel):
     improperHeadRatioThreshold: float | None = None
     repetitivePatternThreshold: int | None = None
     skipSyncNet: bool | None = None
+
+
+def _redis_job_key(job_id: str) -> str:
+    return f"{PROCTOR_JOB_STORE_PREFIX}:{job_id}"
+
+
+def _build_redis_url() -> str:
+    if REDIS_URL:
+        return REDIS_URL
+    if not REDIS_HOST:
+        return ""
+    auth = ""
+    if REDIS_USERNAME and REDIS_PASSWORD:
+        auth = f"{REDIS_USERNAME}:{REDIS_PASSWORD}@"
+    elif REDIS_PASSWORD:
+        auth = f":{REDIS_PASSWORD}@"
+    return f"redis://{auth}{REDIS_HOST}:{REDIS_PORT}"
+
+
+def _get_redis_client():
+    global _redis_client, _redis_disabled
+    if _redis_disabled:
+        return None
+    if _redis_client is not None:
+        return _redis_client
+    redis_url = _build_redis_url()
+    if not redis_url:
+        _redis_disabled = True
+        return None
+    try:
+        import redis as redis_lib
+
+        c = redis_lib.Redis.from_url(redis_url, decode_responses=True)
+        c.ping()
+        _redis_client = c
+        return _redis_client
+    except Exception:
+        _redis_disabled = True
+        return None
+
+
+def _job_set(job_id: str, **fields: object) -> None:
+    client = _get_redis_client()
+    if client is not None:
+        key = _redis_job_key(job_id)
+        raw = client.get(key)
+        prev = json.loads(raw) if raw else {}
+        data = {**prev, **fields}
+        client.setex(key, max(60, PROCTOR_JOB_TTL_SEC), json.dumps(data))
+        return
+    with _job_store_lock:
+        prev = _job_store.get(job_id, {})
+        _job_store[job_id] = {**prev, **fields}
+
+
+def _job_get(job_id: str) -> dict | None:
+    client = _get_redis_client()
+    if client is not None:
+        raw = client.get(_redis_job_key(job_id))
+        if not raw:
+            return None
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+    with _job_store_lock:
+        v = _job_store.get(job_id)
+        return dict(v) if v else None
+
+
+def _kafka_producer():
+    try:
+        from kafka import KafkaProducer
+    except ImportError as exc:
+        raise RuntimeError(
+            "kafka-python is required for Kafka mode. Install it via requirements.txt"
+        ) from exc
+    brokers = [b.strip() for b in PROCTOR_KAFKA_BROKERS.split(",") if b.strip()]
+    return KafkaProducer(
+        bootstrap_servers=brokers,
+        value_serializer=lambda v: json.dumps(v).encode("utf-8"),
+        acks="all",
+        retries=3,
+    )
+
+
+def _kafka_consumer(topic: str, group_id: str):
+    try:
+        from kafka import KafkaConsumer
+    except ImportError as exc:
+        raise RuntimeError(
+            "kafka-python is required for Kafka mode. Install it via requirements.txt"
+        ) from exc
+    brokers = [b.strip() for b in PROCTOR_KAFKA_BROKERS.split(",") if b.strip()]
+    return KafkaConsumer(
+        topic,
+        bootstrap_servers=brokers,
+        group_id=group_id,
+        enable_auto_commit=True,
+        auto_offset_reset="latest",
+        value_deserializer=lambda b: json.loads(b.decode("utf-8")),
+        consumer_timeout_ms=1000,
+    )
+
+
+def _payload_to_dict(payload: ProctorSignalsRequest) -> dict:
+    if hasattr(payload, "model_dump"):
+        return payload.model_dump()
+    return payload.dict()
 
 
 def _build_proctor_thresholds(payload: ProctorSignalsRequest) -> ProctorThresholds:
@@ -858,9 +1037,7 @@ def _build_proctor_thresholds(payload: ProctorSignalsRequest) -> ProctorThreshol
     )
 
 
-@app.post("/analyze/proctor-signals")
-async def analyze_proctor_signals(payload: ProctorSignalsRequest = Body(...)):
-    job_id = uuid.uuid4().hex[:12]
+def _execute_proctor_signals(payload: ProctorSignalsRequest, *, job_id: str) -> dict:
     reference = f"cand_{job_id}"
     job_dir = TEMP_DIR / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
@@ -902,11 +1079,28 @@ async def analyze_proctor_signals(payload: ProctorSignalsRequest = Body(...)):
         eye_reliable = bool(eye_tracking.get("reliable", True))
         offscreen_ratio = pose_result["eyeMovement"]["offScreenRatio"]
         improper_head_ratio = pose_result["headPose"]["improperHeadRatio"]
-        repetitive_pattern = pose_result["eyeMovement"]["repetitivePatternDetected"]
-        pattern_verdict = pose_result["eyeMovement"].get("patternVerdict")
-        reading_pattern_flag = eye_reliable and pattern_verdict == "READING_LIKE"
-        eye_flag = eye_reliable and (
-            offscreen_ratio >= thresholds.offscreen_ratio_threshold or repetitive_pattern
+        repetitive_pattern_count = int(
+            pose_result["eyeMovement"].get("repetitivePatternCount", 0) or 0
+        )
+        reading_pattern_score = float(
+            pose_result["eyeMovement"].get("readingPatternScore", 0.0) or 0.0
+        )
+        direction_counts = pose_result["eyeMovement"].get("directionCounts", {}) or {}
+        non_center_count = int(direction_counts.get("LEFT", 0) or 0) + int(
+            direction_counts.get("RIGHT", 0) or 0
+        ) + int(direction_counts.get("UP", 0) or 0) + int(
+            direction_counts.get("DOWN", 0) or 0
+        )
+        valid_eye_frames = int(pose_result["eyeMovement"].get("validEyeFrames", 0) or 0)
+        eye_movement_flag = (
+            valid_eye_frames > 0 and (non_center_count / valid_eye_frames) >= 0.4
+        )
+        reading_from_external_flag = eye_reliable and (
+            (
+                offscreen_ratio >= thresholds.offscreen_ratio_threshold
+                and repetitive_pattern_count >= thresholds.repetitive_pattern_threshold
+            )
+            or reading_pattern_score >= 0.60
         )
         head_flag = improper_head_ratio >= thresholds.improper_head_ratio_threshold
 
@@ -916,82 +1110,216 @@ async def analyze_proctor_signals(payload: ProctorSignalsRequest = Body(...)):
                 {
                     "type": "LIP_SYNC_MISMATCH",
                     "severity": "HIGH",
-                    "evidence": "Audio-video synchronization mismatch detected by fused model pipeline",
-                    "keyTimestamps": [],
                 }
             )
-        if eye_flag:
+        if reading_from_external_flag:
             flags.append(
                 {
-                    "type": "OFF_SCREEN_GAZE",
+                    "type": "READING_FROM_EXTERNAL",
                     "severity": "MEDIUM",
-                    "evidence": (
-                        f"Off-screen eye ratio {offscreen_ratio:.2f}"
-                        + (" with repetitive glance pattern" if repetitive_pattern else "")
-                    ),
-                    "keyTimestamps": [s["range"] for s in pose_result["eyeMovement"]["segments"][:5]],
                 }
             )
-        if reading_pattern_flag:
+        if eye_movement_flag:
             flags.append(
                 {
-                    "type": "SUBTLE_READING",
+                    "type": "EYE_MOVEMENT",
                     "severity": "MEDIUM",
-                    "evidence": f"Eye reading pattern detected (score: {pose_result['eyeMovement'].get('readingPatternScore', 0)})",
-                    "keyTimestamps": [s["range"] for s in pose_result["eyeMovement"]["segments"][:5]],
                 }
             )
         if head_flag:
             flags.append(
                 {
-                    "type": "READING_FROM_EXTERNAL",
+                    "type": "IMPROPER_HEAD_POSE",
                     "severity": "MEDIUM",
-                    "evidence": f"Improper head pose ratio {improper_head_ratio:.2f}",
-                    "keyTimestamps": [s["range"] for s in pose_result["headPose"]["segments"][:5]],
                 }
             )
 
         suspicious = len(flags) > 0
         verdict = "SUSPECT" if suspicious else "CLEAR"
         confidence = 0.88 if suspicious else 0.2
-        return JSONResponse(
-            content={
-                "jobId": job_id,
-                "questionId": payload.questionId,
-                "candidateId": payload.candidateId,
-                "videoUrl": payload.videoUrl,
-                "lipSync": {
-                    "passed": fused_lipsync.get("passed", False),
-                    "verdict": fused_lipsync.get("verdict"),
-                    "reason": fused_lipsync.get("reason"),
-                    "fusion": {
-                        "mode": "syncnet_only",
-                        "positiveMethods": fused_lipsync.get("positive_methods", []),
-                        "syncNetSkipped": skip_sn,
-                        "flagSource": PROCTOR_LIPSYNC_FLAG_SOURCE,
-                        "mediapipeLipSyncSkipped": True,
-                    },
-                    "syncnet": syncnet_out,
+        return {
+            "jobId": job_id,
+            "questionId": payload.questionId,
+            "candidateId": payload.candidateId,
+            "videoUrl": payload.videoUrl,
+            "lipSync": {
+                "passed": fused_lipsync.get("passed", False),
+                "verdict": fused_lipsync.get("verdict"),
+                "reason": fused_lipsync.get("reason"),
+                "fusion": {
+                    "mode": "syncnet_only",
+                    "positiveMethods": fused_lipsync.get("positive_methods", []),
+                    "syncNetSkipped": skip_sn,
+                    "flagSource": PROCTOR_LIPSYNC_FLAG_SOURCE,
+                    "mediapipeLipSyncSkipped": True,
                 },
-                "eyeMovement": pose_result["eyeMovement"],
-                "headPose": pose_result["headPose"],
-                "videoMeta": pose_result["videoMeta"],
-                "integrityAnalysis": {
-                    "verdict": verdict,
-                    "confidenceScore": confidence,
-                    "flags": flags,
-                },
-                "summary": {
-                    "suspicious": suspicious,
-                    "signalCount": len(flags),
-                    "rules": pose_result["summary"]["rules"],
-                },
-            }
-        )
+                "syncnet": syncnet_out,
+            },
+            "eyeMovement": pose_result["eyeMovement"],
+            "headPose": pose_result["headPose"],
+            "videoMeta": pose_result["videoMeta"],
+            "integrityAnalysis": {
+                "verdict": verdict,
+                "confidenceScore": confidence,
+                "flags": flags,
+            },
+            "summary": {
+                "suspicious": suspicious,
+                "signalCount": len(flags),
+                "rules": pose_result["summary"]["rules"],
+            },
+        }
     except Exception as exc:
-        raise HTTPException(status_code=422, detail=str(exc)[:4000]) from exc
+        raise RuntimeError(str(exc)[:4000]) from exc
     finally:
         shutil.rmtree(job_dir, ignore_errors=True)
+
+
+def _process_kafka_job(job_id: str, payload_dict: dict) -> dict:
+    payload = ProctorSignalsRequest(**payload_dict)
+    _job_set(job_id, status="PROCESSING", updatedAt=int(time.time()))
+    try:
+        result = _execute_proctor_signals(payload, job_id=job_id)
+        _job_set(
+            job_id,
+            status="DONE",
+            updatedAt=int(time.time()),
+            completedAt=int(time.time()),
+            result=result,
+            error=None,
+        )
+        return result
+    except Exception as exc:
+        _job_set(
+            job_id,
+            status="FAILED",
+            updatedAt=int(time.time()),
+            completedAt=int(time.time()),
+            error=str(exc)[:4000],
+        )
+        raise
+
+
+def _kafka_worker_loop() -> None:
+    req_consumer = _kafka_consumer(PROCTOR_KAFKA_REQUEST_TOPIC, PROCTOR_KAFKA_GROUP)
+    producer = _kafka_producer()
+    while not _kafka_thread_stop.is_set():
+        for msg in req_consumer:
+            if _kafka_thread_stop.is_set():
+                break
+            data = msg.value or {}
+            job_id = str(data.get("jobId") or "")
+            payload = data.get("payload") or {}
+            if not job_id:
+                continue
+            try:
+                result = _process_kafka_job(job_id, payload)
+                producer.send(
+                    PROCTOR_KAFKA_RESULT_TOPIC,
+                    {"jobId": job_id, "status": "DONE", "result": result, "ts": int(time.time())},
+                )
+            except Exception as exc:
+                producer.send(
+                    PROCTOR_KAFKA_RESULT_TOPIC,
+                    {"jobId": job_id, "status": "FAILED", "error": str(exc)[:4000], "ts": int(time.time())},
+                )
+    req_consumer.close()
+    producer.close()
+
+
+def _kafka_result_listener_loop() -> None:
+    consumer = _kafka_consumer(
+        PROCTOR_KAFKA_RESULT_TOPIC, f"{PROCTOR_KAFKA_GROUP}-results-{uuid.uuid4().hex[:6]}"
+    )
+    while not _kafka_thread_stop.is_set():
+        for msg in consumer:
+            if _kafka_thread_stop.is_set():
+                break
+            data = msg.value or {}
+            job_id = str(data.get("jobId") or "")
+            if not job_id:
+                continue
+            status = str(data.get("status") or "UNKNOWN")
+            if status == "DONE":
+                _job_set(
+                    job_id,
+                    status="DONE",
+                    updatedAt=int(time.time()),
+                    completedAt=int(time.time()),
+                    result=data.get("result"),
+                    error=None,
+                )
+            elif status == "FAILED":
+                _job_set(
+                    job_id,
+                    status="FAILED",
+                    updatedAt=int(time.time()),
+                    completedAt=int(time.time()),
+                    error=str(data.get("error") or "unknown error")[:4000],
+                )
+    consumer.close()
+
+
+@app.on_event("startup")
+async def _startup_kafka_threads() -> None:
+    if not PROCTOR_KAFKA_ENABLED:
+        return
+    threading.Thread(target=_kafka_result_listener_loop, daemon=True).start()
+    if PROCTOR_KAFKA_START_WORKER:
+        threading.Thread(target=_kafka_worker_loop, daemon=True).start()
+
+
+@app.on_event("shutdown")
+async def _shutdown_kafka_threads() -> None:
+    _kafka_thread_stop.set()
+
+
+@app.post("/analyze/proctor-signals")
+async def analyze_proctor_signals(payload: ProctorSignalsRequest = Body(...)):
+    job_id = uuid.uuid4().hex[:12]
+    try:
+        body = _execute_proctor_signals(payload, job_id=job_id)
+        return JSONResponse(content=body)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=str(exc)[:4000]) from exc
+
+
+@app.post("/analyze/proctor-signals/submit")
+async def submit_proctor_signals(payload: ProctorSignalsRequest = Body(...)):
+    if not PROCTOR_KAFKA_ENABLED:
+        raise HTTPException(
+            status_code=503,
+            detail="Kafka mode disabled. Set PROCTOR_KAFKA_ENABLED=true",
+        )
+    job_id = uuid.uuid4().hex[:12]
+    _job_set(
+        job_id,
+        status="QUEUED",
+        createdAt=int(time.time()),
+        updatedAt=int(time.time()),
+        result=None,
+        error=None,
+    )
+    try:
+        producer = _kafka_producer()
+        producer.send(
+            PROCTOR_KAFKA_REQUEST_TOPIC,
+            {"jobId": job_id, "payload": _payload_to_dict(payload), "ts": int(time.time())},
+        )
+        producer.flush(timeout=10)
+        producer.close()
+    except Exception as exc:
+        _job_set(job_id, status="FAILED", updatedAt=int(time.time()), error=str(exc)[:4000])
+        raise HTTPException(status_code=500, detail=f"kafka enqueue failed: {str(exc)[:1000]}") from exc
+    return {"jobId": job_id, "status": "QUEUED"}
+
+
+@app.get("/analyze/proctor-signals/jobs/{job_id}")
+async def get_proctor_signals_job(job_id: str):
+    state = _job_get(job_id)
+    if not state:
+        raise HTTPException(status_code=404, detail=f"job not found: {job_id}")
+    return {"jobId": job_id, **state}
 
 
 @app.post("/analyze")

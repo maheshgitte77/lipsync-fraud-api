@@ -113,3 +113,27 @@ For **Amazon Linux 2023**, use the same Python venv steps manually: install `git
 
 - `POST /analyze` — multipart video upload, lip-sync analysis.
 - `POST /analyze/proctor-signals` — combined lip sync + eye/head signals (see `PROCTOR_SIGNALS_FIELD_GUIDE.md`).
+- `POST /analyze/proctor-signals/submit` — enqueue async proctor job to Kafka; returns `jobId`.
+- `GET /analyze/proctor-signals/jobs/{jobId}` — fetch async job status/result.
+
+### Kafka async mode
+
+Use this when request volume is high and you want non-blocking API behavior.
+
+- Set `PROCTOR_KAFKA_ENABLED=true`.
+- Set `PROCTOR_KAFKA_BROKERS` to your existing cluster bootstrap servers.
+- Optional: set `PROCTOR_KAFKA_START_WORKER=true` to let this API instance consume request jobs and produce results.
+- Configure topics with:
+  - `PROCTOR_KAFKA_REQUEST_TOPIC` (default `proctor.signals.requests`)
+  - `PROCTOR_KAFKA_RESULT_TOPIC` (default `proctor.signals.results`)
+  - `PROCTOR_KAFKA_GROUP` (default `lipsync-fraud-proctor-workers`)
+- Configure Redis job store (recommended for non-blocking polling across restarts and multiple API instances):
+  - `REDIS_URL=redis://user:pass@host:port` (preferred)
+  - or `REDIS_HOST` + `REDIS_PORT` + optional `REDIS_USERNAME` / `REDIS_PASSWORD`
+  - `PROCTOR_JOB_STORE_PREFIX` (default `proctor:job`)
+  - `PROCTOR_JOB_TTL_SEC` (default `86400`)
+
+Flow:
+1. Client calls submit endpoint -> gets `jobId`.
+2. Worker consumes request topic, runs existing proctor analysis, publishes result to result topic.
+3. API listens to result topic and serves final payload via job status endpoint.
