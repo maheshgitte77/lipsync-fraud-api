@@ -1074,7 +1074,13 @@ def _execute_proctor_signals(payload: ProctorSignalsRequest, *, job_id: str) -> 
             if skip_sn:
                 lip_sync_mismatch = False
             else:
-                lip_sync_mismatch = not bool(syncnet_out.get("passed", False))
+                # If SyncNet errored (missing deps, decode errors, etc.), don't turn that into cheating.
+                # Treat it as an inconclusive lip-sync signal.
+                syncnet_verdict = str(syncnet_out.get("verdict") or "").upper()
+                if syncnet_verdict == "ERROR" or bool(syncnet_out.get("error")):
+                    lip_sync_mismatch = False
+                else:
+                    lip_sync_mismatch = not bool(syncnet_out.get("passed", False))
         eye_tracking = pose_result["eyeMovement"].get("eyeTracking", {})
         eye_reliable = bool(eye_tracking.get("reliable", True))
         offscreen_ratio = pose_result["eyeMovement"]["offScreenRatio"]

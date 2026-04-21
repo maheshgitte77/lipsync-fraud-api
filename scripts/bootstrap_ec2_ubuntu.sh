@@ -15,7 +15,10 @@ if [[ "$(id -u)" -eq 0 ]]; then
 fi
 
 sudo apt-get update -y
-sudo apt-get install -y git ffmpeg python3 python3-venv python3-pip wget curl
+sudo apt-get install -y \
+  git ffmpeg python3 python3-venv python3-pip wget curl \
+  libgl1 libglib2.0-0 libegl1 libgles2 || \
+  sudo apt-get install -y libgl1 libglib2.0-0 libegl1 libgles2-mesa
 
 python3 -m venv .venv
 # shellcheck source=/dev/null

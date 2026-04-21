@@ -10,6 +10,8 @@ librosa>=0.10.0
 soundfile>=0.12.0
 kafka-python>=2.0.2
 redis>=5.0.0
+scenedetect>=0.6.4
+python_speech_features>=0.6
 
 # SyncNet pipeline (run in the same environment as uvicorn):
 #   pip install -r syncnet_python/requirements.txt
