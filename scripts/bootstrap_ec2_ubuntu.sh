@@ -30,6 +30,9 @@ python -m pip install -r requirements.txt
 
 bash "$REPO_ROOT/scripts/setup_syncnet.sh"
 python -m pip install -r "$REPO_ROOT/syncnet_python/requirements.txt"
+# syncnet_python upstream pins scenedetect==0.5.1, but this service's run_pipeline
+# uses open_video (0.6+ API). Re-upgrade to compatible version.
+python -m pip install "scenedetect>=0.6.4"
 
 echo ""
 echo "Done. Activate and run API:"

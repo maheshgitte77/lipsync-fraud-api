@@ -20,3 +20,6 @@ Thumbs.db
 .ruff_cache/
 .idea/
 .vscode/
+
+# ignore images and videos
+

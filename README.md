@@ -1,139 +1,169 @@
 # lipsync-fraud-api
 
-FastAPI service: **SyncNet** (audio–video lip sync), **MediaPipe** lip–audio correlation, and optional **proctor signals** (eye / head) for interview videos.
+Production-grade FastAPI service for:
 
-SyncNet upstream code and weight files are **not** stored in this repository. They are installed on the machine (or EC2 instance) at deploy time.
+- **Lip-sync authenticity** — SyncNet (+ optional MediaPipe correlation).
+- **Proctor signals** — eye gaze + head pose + reading-pattern detection.
+- **TTS** — pluggable providers (ElevenLabs, Google, Deepgram, Cartesia, Inworld) with fallback.
+- **Avatar generation** — HeyGen cloud avatar video generation.
 
-## What goes to GitHub
+Async-ready: Kafka job queue + Redis job store. GPU/CPU toggle via env. S3 / local artifact storage.
 
-- Application code under `app/`, `scripts/`, `requirements.txt`, `.env.example`, and this README.
-- The folder `syncnet_python/` is listed in `.gitignore`. After `git clone` of this repo, run **`scripts/setup_syncnet.sh`** (Linux) or **`scripts/setup_syncnet.ps1`** (Windows) once to create `syncnet_python/` and download weights.
+---
 
-If you previously committed `syncnet_python` by mistake, stop tracking it (files stay on disk) and commit the updated `.gitignore`:
+## Architecture
 
-```bash
-git rm -r --cached syncnet_python
-git add .gitignore
-git commit -m "Stop tracking syncnet_python; use setup script at deploy"
+```
+            ┌──────────────────────────────┐
+            │         FastAPI (app/)       │
+            │   api/ routes delegate to    │
+            │   services/ (no ML here)     │
+            └──────────────┬───────────────┘
+                           │
+     ┌─────────────────────┼─────────────────────────┐
+     ▼                     ▼                         ▼
+services/lipsync     services/fraud           services/heygen
+  ├─ syncnet_service   └─ proctor_service       └─ heygen_service
+  ├─ mediapipe_service
+  └─ window_builder                                         │
+     │                                                       ▼
+     │                                               services/tts
+     │                                                 └─ tts_service
+     │                                                        │
+     │                                                        ▼
+     │                                               providers/tts/
+     │                                                 ├─ elevenlabs
+     │                                                 ├─ google
+     │                                                 ├─ deepgram
+     │                                                 ├─ cartesia
+     │                                                 └─ inworld
+     ▼
+workers/ (kafka_worker, job_store) ──── utils/ (ffmpeg, storage, video_download)
+core/   (config, logger, device, metrics)
 ```
 
-## Local setup
+### Folder layout
 
-**Prerequisites:** Git, Python 3.10+, `ffmpeg` on `PATH`.
+```
+lipsync-fraud-api/
+├── app/
+│   ├── main.py                      # thin FastAPI entry (lifespan + router)
+│   ├── api/                         # HTTP routes
+│   │   ├── routes.py                # aggregates sub-routers
+│   │   ├── health.py                # /, /health, /config
+│   │   ├── analyze.py               # /analyze, /analyze/proctor-signals*
+│   │   ├── tts.py                   # /tts/generate, /tts/providers
+│   │   └── heygen.py                # /heygen/generate, /heygen/providers
+│   ├── core/
+│   │   ├── config.py                # centralized Settings (dataclasses)
+│   │   ├── logger.py                # get_logger(name)
+│   │   ├── device.py                # DeviceManager (CPU/GPU toggle)
+│   │   └── metrics.py               # StageTimer (per-stage ms)
+│   ├── models/                      # pydantic request/response schemas
+│   │   ├── proctor.py
+│   │   ├── tts.py
+│   │   └── heygen.py
+│   ├── services/
+│   │   ├── lipsync/                 # SyncNet + MediaPipe correlation
+│   │   ├── fraud/                   # eye + head proctor analysis
+│   │   ├── tts/                     # strategy dispatcher + fallback chain
+│   │   ├── heygen/                  # HeyGen generation + polling
+│   │   └── orchestration/           # proctor_orchestrator (download→run→fuse)
+│   ├── providers/tts/               # one file per TTS provider
+│   ├── workers/                     # kafka_worker, job_store
+│   └── utils/                       # ffmpeg, video_download, file_manager, storage
+├── syncnet_python/                  # legacy location, still supported via SYNCNET_DIR
+├── scripts/                         # setup helpers, CI/dev ops
+├── requirements.txt
+├── .env.example
+└── README.md
+```
 
-1. Clone this repository.
-2. Create a virtual environment and install Python dependencies (install **CPU PyTorch** before or with SyncNet deps; see `requirements.txt` comments).
+---
 
-   ```bash
-   python3 -m venv .venv
-   source .venv/bin/activate   # Windows: .venv\Scripts\activate
-   pip install --upgrade pip wheel
-   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-   pip install -r requirements.txt
-   ```
+## Quick start
 
-3. Install SyncNet + weights + CPU patches:
+```bash
+# 1. Install python deps
+pip install -r requirements.txt
+# Install torch matching your platform:
+#   CPU:  pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+#   CUDA: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 
-   ```bash
-   bash scripts/setup_syncnet.sh
-   pip install -r syncnet_python/requirements.txt
-   ```
+# 2. Bring SyncNet into place (clone + weights)
+bash scripts/setup_syncnet.sh    # or scripts/setup_syncnet.ps1 on Windows
 
-   On Windows:
+# 3. Copy env & edit
+cp .env.example .env
 
-   ```powershell
-   .\scripts\setup_syncnet.ps1
-   pip install -r syncnet_python\requirements.txt
-   ```
+# 4. Run
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+```
 
-4. Copy `.env.example` to `.env` and adjust.
+---
 
-5. Run the API from the repo root:
+## GPU / CPU toggle
 
-   ```bash
-   uvicorn app.main:app --host 0.0.0.0 --port 8000
-   ```
+Switch runtime by setting `DEVICE` in `.env`:
 
-Check **`GET /health`**: `model_present` should be `true` when `data/syncnet_v2.model` exists under `syncnet_python`.
+| DEVICE | Behaviour                                           |
+| ------ | --------------------------------------------------- |
+| `auto` | Use CUDA if available, else CPU (default).          |
+| `gpu`  | Force CUDA. Logs a warning + uses CPU if missing.    |
+| `cpu`  | Force CPU. Also passes `CUDA_VISIBLE_DEVICES=` to subprocesses. |
 
-### Environment overrides
+`GPU_ID` picks the CUDA device when multiple GPUs are present. Runtime info is
+exposed at `GET /health` and `GET /config`.
 
-| Variable | Purpose |
-|----------|---------|
-| `SYNCNET_DIR` | Path to the SyncNet tree (default: `./syncnet_python`). |
-| `SYNCNET_REPO_URL` | Git URL for `setup_syncnet.sh` (default: `https://github.com/joonson/syncnet_python.git`). |
-| `SKIP_SYNCNET_PATCH` | Set to `1` to skip `patch_syncnet_cpu.py` (not recommended on CPU servers). |
+---
 
-MediaPipe **Face Landmarker** `.task` files are downloaded on first use into `.cache/` (already ignored).
+## Adding a TTS provider
 
-### Faster runs on long videos (optional trim)
+1. Add a file under `app/providers/tts/your_provider.py` implementing
+   `BaseTTSProvider` (`is_available()`, `generate(text, out_path, voice) -> TTSResult`).
+2. Register it in `app/providers/tts/__init__.py` and in
+   `TTSService._default_providers()`.
+3. Add config fields to `app.core.config.TTSSettings` and `.env.example`.
 
-SyncNet scales with clip length. To cap work to the **opening segment** only (one continuous trim from `t=0`, not multiple tiles):
+Selection is controlled via `TTS_DEFAULT_PROVIDER` and `TTS_FALLBACK_ORDER`.
+The service tries providers in order and skips unavailable ones.
 
-| Variable | Default | Meaning |
-|----------|---------|---------|
-| `LIPSYNC_VIDEO_TRIM` | off | Set to `true` / `1` / `yes` to enable. |
-| `LIPSYNC_TRIM_MAX_SECONDS` | `15` | Maximum seconds kept (clamped 1–600). Shorter uploads are unchanged. |
-| `LIPSYNC_WINDOW_POSITION` | `start` | Where the single SyncNet window comes from: `start`, `middle`, or `end`. |
+---
 
-When enabled, SyncNet uses exactly one window from the original video (`LIPSYNC_TRIM_MAX_SECONDS` long, clamped by source length) at the selected position. MediaPipe lip-sync and proctor eye/head continue to use the original full video.
+## HTTP endpoints
 
-Example with `LIPSYNC_TRIM_MAX_SECONDS=15`:
-- 82s video + `start`  -> `0s..15s`
-- 82s video + `middle` -> `33.7s..48.7s`
-- 82s video + `end`    -> `67s..82s`
+| Method | Path                                           | Purpose                               |
+| ------ | ---------------------------------------------- | ------------------------------------- |
+| GET    | `/`                                            | Service summary                        |
+| GET    | `/health`                                      | Readiness + device + models check      |
+| GET    | `/config`                                      | Non-secret runtime config              |
+| POST   | `/analyze` (multipart)                         | SyncNet verdict from an uploaded video |
+| POST   | `/analyze/proctor-signals`                     | Sync proctor analysis (downloads URL)  |
+| POST   | `/analyze/proctor-signals/submit`              | Enqueue to Kafka, returns jobId        |
+| GET    | `/analyze/proctor-signals/jobs/{job_id}`       | Poll job state                         |
+| GET    | `/tts/providers`                               | Which TTS providers are configured     |
+| POST   | `/tts/generate`                                | Text → audio file URL                  |
+| GET    | `/heygen/providers`                            | HeyGen availability + defaults          |
+| POST   | `/heygen/generate`                             | Text/script → cloud avatar video URL    |
 
-**Trade-off:** trim/windowing can miss cheating outside sampled SyncNet windows. Since MediaPipe/proctor still run on the full video, cross-signal comparisons can differ by coverage window.
+---
 
-Responses: `POST /analyze` includes `video_trim` `{ trimEnabled, trimMaxSeconds, trimApplied, sourceDurationSec, analyzedDurationSec }`. `POST /analyze/proctor-signals` merges the same object under `videoMeta.trim`.
+## Scaling the service
 
-## AWS EC2 (Ubuntu 22.04)
+- **Stateless API**: run multiple replicas behind a load balancer.
+- **Kafka worker pool**: `PROCTOR_KAFKA_START_WORKER=true` on worker pods, `false` on API pods.
+- **Redis**: shared job state across replicas.
+- **GPU pool**: not required for avatar generation now (HeyGen is cloud-based).
+- **S3 storage**: set `STORAGE_BACKEND=s3` for signed avatar URLs returned to clients.
 
-Typical flow:
+---
 
-1. Launch an instance (x86_64), open security group port **8000** (or put nginx/ALB in front).
-2. SSH in, install Git, clone **this** repo (your GitHub URL).
-3. From the repo root:
+## Migration notes (v1 → v2)
 
-   ```bash
-   chmod +x scripts/bootstrap_ec2_ubuntu.sh scripts/setup_syncnet.sh
-   bash scripts/bootstrap_ec2_ubuntu.sh
-   ```
-
-4. Edit `.env`, then run under a process manager or `tmux`:
-
-   ```bash
-   source .venv/bin/activate
-   uvicorn app.main:app --host 0.0.0.0 --port 8000
-   ```
-
-For **Amazon Linux 2023**, use the same Python venv steps manually: install `git`, `ffmpeg`, `python3`, `python3-pip`, `wget` with `dnf`, then run the `python3 -m venv` / `pip` / `scripts/setup_syncnet.sh` commands from `bootstrap_ec2_ubuntu.sh` (that script is Ubuntu-oriented because of `apt-get`).
-
-## API
-
-- `POST /analyze` — multipart video upload, lip-sync analysis.
-- `POST /analyze/proctor-signals` — combined lip sync + eye/head signals (see `PROCTOR_SIGNALS_FIELD_GUIDE.md`).
-- `POST /analyze/proctor-signals/submit` — enqueue async proctor job to Kafka; returns `jobId`.
-- `GET /analyze/proctor-signals/jobs/{jobId}` — fetch async job status/result.
-
-### Kafka async mode
-
-Use this when request volume is high and you want non-blocking API behavior.
-
-- Set `PROCTOR_KAFKA_ENABLED=true`.
-- Set `PROCTOR_KAFKA_BROKERS` to your existing cluster bootstrap servers.
-- Optional: set `PROCTOR_KAFKA_START_WORKER=true` to let this API instance consume request jobs and produce results.
-- Configure topics with:
-  - `PROCTOR_KAFKA_REQUEST_TOPIC` (default `proctor.signals.requests`)
-  - `PROCTOR_KAFKA_RESULT_TOPIC` (default `proctor.signals.results`)
-  - `PROCTOR_KAFKA_GROUP` (default `lipsync-fraud-proctor-workers`)
-- Configure Redis job store (recommended for non-blocking polling across restarts and multiple API instances):
-  - `REDIS_URL=redis://user:pass@host:port` (preferred)
-  - or `REDIS_HOST` + `REDIS_PORT` + optional `REDIS_USERNAME` / `REDIS_PASSWORD`
-  - `PROCTOR_JOB_STORE_PREFIX` (default `proctor:job`)
-  - `PROCTOR_JOB_TTL_SEC` (default `86400`)
-
-Flow:
-1. Client calls submit endpoint -> gets `jobId`.
-2. Worker consumes request topic, runs existing proctor analysis, publishes result to result topic.
-3. API listens to result topic and serves final payload via job status endpoint.
+- All runtime config now comes from `app.core.config.settings`. **Do not read `os.environ` in service code.**
+- `app/main.py` no longer contains business logic — only ASGI wiring.
+- `app/proctor_signals.py` → `app/services/fraud/proctor_service.py`.
+- `app/mediapipe_lipsync.py` → `app/services/lipsync/mediapipe_service.py`.
+- Kafka / Redis code → `app/workers/*`.
+- FFmpeg helpers → `app/utils/ffmpeg.py`.
+- SyncNet script interface unchanged — still driven by `syncnet_python/`.
